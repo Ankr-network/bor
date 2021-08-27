@@ -27,11 +27,11 @@ func (s *PublicBlockChainAPI) GetBorBlockReceipt(ctx context.Context, hash commo
 func (s *PublicBlockChainAPI) appendRPCMarshalBorTransaction(ctx context.Context, block *types.Block, fields map[string]interface{}, fullTx bool) map[string]interface{} {
 	if block != nil {
 		txHash := types.GetDerivedBorTxHash(types.BorReceiptKey(block.Number().Uint64(), block.Hash()))
-		borTx, blockHash, blockNumber, txIndex, _ := s.b.GetBorBlockTransaction(ctx, txHash)
+		borTx, blockHash, blockNumber, txIndex, _ := s.b.GetBorBlockTransactionWithBlockHash(ctx, txHash, block.Hash())
 		if borTx != nil {
 			formattedTxs := fields["transactions"].([]interface{})
 			if fullTx {
-				marshalledTx := newRPCTransaction(borTx, blockHash, blockNumber, txIndex)
+				marshalledTx := newRPCTransaction(borTx, blockHash, blockNumber, txIndex, nil)
 				// newRPCTransaction calculates hash based on RLP of the transaction data.
 				// In case of bor block tx, we need simple derived tx hash (same as function argument) instead of RLP hash
 				marshalledTx.Hash = txHash
