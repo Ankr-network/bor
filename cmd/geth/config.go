@@ -23,12 +23,18 @@ import (
 	"math/big"
 	"os"
 	"reflect"
+	"time"
 	"unicode"
 
 	"gopkg.in/urfave/cli.v1"
 
+	"github.com/ethereum/go-ethereum/accounts/external"
+	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/accounts/scwallet"
+	"github.com/ethereum/go-ethereum/accounts/usbwallet"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/eth/catalyst"
+	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
@@ -129,12 +135,25 @@ func makeConfigNode(ctx *cli.Context) (*node.Node, gethConfig) {
 		}
 	}
 
+	if ctx.GlobalIsSet(utils.MumbaiFlag.Name) {
+		setDefaultMumbaiGethConfig(ctx, &cfg)
+	}
+
+	if ctx.GlobalIsSet(utils.BorMainnetFlag.Name) {
+		setDefaultBorMainnetGethConfig(ctx, &cfg)
+	}
+
 	// Apply flags.
 	utils.SetNodeConfig(ctx, &cfg.Node)
 	stack, err := node.New(&cfg.Node)
 	if err != nil {
 		utils.Fatalf("Failed to create the protocol stack: %v", err)
 	}
+	// Node doesn't by default populate account manager backends
+	if err := setAccountManagerBackends(stack); err != nil {
+		utils.Fatalf("Failed to set account manager backends: %v", err)
+	}
+
 	utils.SetEthConfig(ctx, stack, &cfg.Eth)
 	if ctx.GlobalIsSet(utils.EthStatsURLFlag.Name) {
 		cfg.Ethstats.URL = ctx.GlobalString(utils.EthStatsURLFlag.Name)
@@ -259,4 +278,109 @@ func deprecated(field string) bool {
 	default:
 		return false
 	}
+}
+
+func setAccountManagerBackends(stack *node.Node) error {
+	conf := stack.Config()
+	am := stack.AccountManager()
+	keydir := stack.KeyStoreDir()
+	scryptN := keystore.StandardScryptN
+	scryptP := keystore.StandardScryptP
+	if conf.UseLightweightKDF {
+		scryptN = keystore.LightScryptN
+		scryptP = keystore.LightScryptP
+	}
+
+	// Assemble the supported backends
+	if len(conf.ExternalSigner) > 0 {
+		log.Info("Using external signer", "url", conf.ExternalSigner)
+		if extapi, err := external.NewExternalBackend(conf.ExternalSigner); err == nil {
+			am.AddBackend(extapi)
+			return nil
+		} else {
+			return fmt.Errorf("error connecting to external signer: %v", err)
+		}
+	}
+
+	// For now, we're using EITHER external signer OR local signers.
+	// If/when we implement some form of lockfile for USB and keystore wallets,
+	// we can have both, but it's very confusing for the user to see the same
+	// accounts in both externally and locally, plus very racey.
+	am.AddBackend(keystore.NewKeyStore(keydir, scryptN, scryptP))
+	if conf.USB {
+		// Start a USB hub for Ledger hardware wallets
+		if ledgerhub, err := usbwallet.NewLedgerHub(); err != nil {
+			log.Warn(fmt.Sprintf("Failed to start Ledger hub, disabling: %v", err))
+		} else {
+			am.AddBackend(ledgerhub)
+		}
+		// Start a USB hub for Trezor hardware wallets (HID version)
+		if trezorhub, err := usbwallet.NewTrezorHubWithHID(); err != nil {
+			log.Warn(fmt.Sprintf("Failed to start HID Trezor hub, disabling: %v", err))
+		} else {
+			am.AddBackend(trezorhub)
+		}
+		// Start a USB hub for Trezor hardware wallets (WebUSB version)
+		if trezorhub, err := usbwallet.NewTrezorHubWithWebUSB(); err != nil {
+			log.Warn(fmt.Sprintf("Failed to start WebUSB Trezor hub, disabling: %v", err))
+		} else {
+			am.AddBackend(trezorhub)
+		}
+	}
+	if len(conf.SmartCardDaemonPath) > 0 {
+		// Start a smart card hub
+		if schub, err := scwallet.NewHub(conf.SmartCardDaemonPath, scwallet.Scheme, keydir); err != nil {
+			log.Warn(fmt.Sprintf("Failed to start smart card hub, disabling: %v", err))
+		} else {
+			am.AddBackend(schub)
+		}
+	}
+
+	return nil
+}
+
+func setDefaultMumbaiGethConfig(ctx *cli.Context, config *gethConfig) {
+	config.Node.P2P.ListenAddr = fmt.Sprintf(":%d", 30303)
+	config.Node.HTTPHost = "0.0.0.0"
+	config.Node.HTTPVirtualHosts = []string{"*"}
+	config.Node.HTTPCors = []string{"*"}
+	config.Node.HTTPPort = 8545
+	config.Node.IPCPath = utils.MakeDataDir(ctx) + "/bor.ipc"
+	config.Node.HTTPModules = []string{"eth", "net", "web3", "txpool", "bor"}
+	config.Eth.SyncMode = downloader.SnapSync
+	config.Eth.NetworkId = 80001
+	config.Eth.Miner.GasCeil = 20000000
+	//--miner.gastarget is depreceated, No longed used
+	config.Eth.TxPool.NoLocals = true
+	config.Eth.TxPool.AccountSlots = 16
+	config.Eth.TxPool.GlobalSlots = 131072
+	config.Eth.TxPool.AccountQueue = 64
+	config.Eth.TxPool.GlobalQueue = 131072
+	config.Eth.TxPool.Lifetime = 90 * time.Minute
+	config.Node.P2P.MaxPeers = 200
+	config.Metrics.Enabled = true
+	// --pprof is enabled in 'internal/debug/flags.go'
+}
+
+func setDefaultBorMainnetGethConfig(ctx *cli.Context, config *gethConfig) {
+	config.Node.P2P.ListenAddr = fmt.Sprintf(":%d", 30303)
+	config.Node.HTTPHost = "0.0.0.0"
+	config.Node.HTTPVirtualHosts = []string{"*"}
+	config.Node.HTTPCors = []string{"*"}
+	config.Node.HTTPPort = 8545
+	config.Node.IPCPath = utils.MakeDataDir(ctx) + "/bor.ipc"
+	config.Node.HTTPModules = []string{"eth", "net", "web3", "txpool", "bor"}
+	config.Eth.SyncMode = downloader.SnapSync
+	config.Eth.NetworkId = 137
+	config.Eth.Miner.GasCeil = 20000000
+	//--miner.gastarget is depreceated, No longed used
+	config.Eth.TxPool.NoLocals = true
+	config.Eth.TxPool.AccountSlots = 16
+	config.Eth.TxPool.GlobalSlots = 131072
+	config.Eth.TxPool.AccountQueue = 64
+	config.Eth.TxPool.GlobalQueue = 131072
+	config.Eth.TxPool.Lifetime = 90 * time.Minute
+	config.Node.P2P.MaxPeers = 200
+	config.Metrics.Enabled = true
+	// --pprof is enabled in 'internal/debug/flags.go'
 }

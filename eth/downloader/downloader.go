@@ -448,8 +448,8 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 			d.mux.Post(DoneEvent{latest})
 		}
 	}()
-	if p.version < eth.ETH65 {
-		return fmt.Errorf("%w: advertized %d < required %d", errTooOld, p.version, eth.ETH65)
+	if p.version < eth.ETH66 {
+		return fmt.Errorf("%w: advertized %d < required %d", errTooOld, p.version, eth.ETH66)
 	}
 	mode := d.getMode()
 
@@ -815,7 +815,7 @@ func (d *Downloader) findAncestor(p *peerConnection, remoteHeader *types.Header)
 		return 0, err
 	}
 
-	ancestor, err = d.findAncestorBinarySearch(p, mode, remoteHeight, floor)
+	ancestor, err = d.findAncestorBinarySearch(p, mode, localHeight+1, floor)
 	if err != nil {
 		return 0, err
 	}
