@@ -1,20 +1,74 @@
-# Golang CircleCI 2.0 configuration file
-# Check https://circleci.com/docs/2.0/language-go/ for more details
-
 version: 2.1
 
-executors:
-  golang:
-    docker:
-      - image: circleci/golang:1.13
-    working_directory: /go/src/github.com/ethereum/go-ethereum
+global-variables: &global-variables
+  SERVICE_NAME: bor
+  BINARY_DIR: /root/go/bin
+  SCRIPT_PATH: /mnt/chaindata/polygon/bor.sh
 
 jobs:
-  build:
-    executor: golang
+  build-and-upload:
+    working_directory: /build
+    docker:
+      - image: xozzslip/ubuntu-go
     steps:
-      - checkout # check out source code to working directory
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - attach_workspace:
+          at: '.'
       - run:
-          command: make all
+          name: Go Build & Publish
+          environment:
+            <<: *global-variables
+          command: |
+            VERSION=$(git log --decorate --pretty=oneline @ | egrep 'v[0-9\.]+[A-Za-z0-9\.-]*' -o | cut -d ":" -f2 | head -1 | sed -e 's/^ *//')
+            make bor
+            ls -lah ./build/bin
+            echo uploading to $BINARY_DIR/bor-$VERSION-$CIRCLE_SHA1
+            scp -o StrictHostKeyChecking=no ./build/bin/bor $SSH_USERNAME@$SSH_IP:$BINARY_DIR/bor-$VERSION-$CIRCLE_SHA1
+            cd ..
+      - persist_to_workspace:
+          root: '.'
+          paths:
+            - '.'
+
+  deploy:
+    docker:
+      - image: xozzslip/ubuntu-go
+    steps:
+      - setup_remote_docker
       - run:
-          command: make test
+          name: Deploy
+          environment:
+            <<: *global-variables
+          command: |
+            BINARY_NAME=$(ssh -o StrictHostKeyChecking=no -t $SSH_USERNAME@$SSH_IP "ls `echo $BINARY_DIR` | grep `echo $CIRCLE_SHA1` | tr -d '\n'")
+            BINARY_PATH=$BINARY_DIR/$BINARY_NAME
+            echo "going to deploy $BINARY_PATH"
+            SERVICE_PATH=/etc/systemd/system/$SERVICE_NAME.service
+            ssh -o StrictHostKeyChecking=no -t $SSH_USERNAME@$SSH_IP "systemctl stop `echo $SERVICE_NAME`"
+            ssh -o StrictHostKeyChecking=no -t $SSH_USERNAME@$SSH_IP "sed -Ei 's@\/root\/go\/bin[^[:space:]]+@`echo $BINARY_PATH`@g' `echo $SCRIPT_PATH`" 
+            echo "updated service file"
+            ssh -o StrictHostKeyChecking=no -t $SSH_USERNAME@$SSH_IP "systemctl stop `echo $SERVICE_NAME` && systemctl daemon-reload && systemctl start `echo $SERVICE_NAME`"
+
+workflows:
+  build:
+    jobs:
+      - build-and-upload:
+          context: ankrscan-nodes
+          filters:
+            branches:
+              only: feature/full-block-api
+      - approve:
+          filters:
+            branches:
+              only: feature/full-block-api
+          type: approval
+      - deploy:
+          context: ankrscan-nodes
+          requires:
+            - approve
+            - build-and-upload
+          filters:
+            branches:
+              only: feature/full-block-api
